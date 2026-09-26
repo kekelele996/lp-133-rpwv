@@ -75,6 +75,7 @@ const initData = async () => {
         user_id INT NOT NULL,
         volunteer_id INT NOT NULL,
         status ENUM('in_progress', 'completed', 'cancelled') DEFAULT 'in_progress',
+        cancel_reason TEXT,
         service_hours DECIMAL(8, 2) DEFAULT 0,
         start_time DATETIME,
         end_time DATETIME,
@@ -89,6 +90,17 @@ const initData = async () => {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
     console.log('✅ 订单表创建完成');
+
+    // 兼容已有数据库：确保订单取消原因字段存在
+    const [cancelReasonColumns] = await pool.query(`
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'cancel_reason'
+    `);
+    if (cancelReasonColumns.length === 0) {
+      await pool.query("ALTER TABLE orders ADD COLUMN cancel_reason TEXT NULL COMMENT '取消原因' AFTER status");
+    }
+    console.log('✅ 订单取消原因字段检查完成');
 
     // 创建评价表
     await pool.query(`

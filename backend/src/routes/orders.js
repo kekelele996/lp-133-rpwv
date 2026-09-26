@@ -28,6 +28,93 @@ router.get('/', authenticateToken, asyncHandler(async (req, res) => {
   res.json({ orders: rows });
 }));
 
+router.post('/:id/release', authenticateToken, asyncHandler(async (req, res) => {
+  const rawCancelReason = req.body.cancel_reason ?? req.body.reason;
+  const cancelReason = typeof rawCancelReason === 'string'
+    ? rawCancelReason.trim()
+    : '';
+  const orderId = req.params.id;
+
+  if (!cancelReason) {
+    return res.status(400).json({ message: messages.orders.missingCancelReason });
+  }
+
+  const [existingOrders] = await pool.query('SELECT * FROM orders WHERE id = ?', [orderId]);
+  if (existingOrders.length === 0) {
+    return res.status(404).json({ message: messages.orders.notFound });
+  }
+
+  if (existingOrders[0].volunteer_id !== req.user.id) {
+    return res.status(403).json({ message: messages.orders.onlyAssignedVolunteer });
+  }
+
+  if (existingOrders[0].status === 'completed') {
+    return res.status(400).json({ message: messages.orders.completedCannotRelease });
+  }
+
+  if (existingOrders[0].status === 'cancelled') {
+    return res.status(400).json({ message: messages.orders.alreadyCancelled });
+  }
+
+  if (existingOrders[0].status !== 'in_progress') {
+    return res.status(400).json({ message: messages.orders.notInProgress });
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [needs] = await connection.query(
+      'SELECT * FROM needs WHERE id = ? FOR UPDATE',
+      [existingOrders[0].need_id],
+    );
+    const [orders] = await connection.query(
+      'SELECT * FROM orders WHERE id = ? FOR UPDATE',
+      [orderId],
+    );
+    const order = orders[0];
+
+    if (!order || needs.length === 0 || order.status !== 'in_progress' || order.volunteer_id !== req.user.id) {
+      await connection.rollback();
+      if (!order) {
+        return res.status(404).json({ message: messages.orders.notFound });
+      }
+      if (order.volunteer_id !== req.user.id) {
+        return res.status(403).json({ message: messages.orders.onlyAssignedVolunteer });
+      }
+      if (order.status === 'completed') {
+        return res.status(400).json({ message: messages.orders.completedCannotRelease });
+      }
+      if (order.status === 'cancelled') {
+        return res.status(400).json({ message: messages.orders.alreadyCancelled });
+      }
+      return res.status(400).json({ message: messages.orders.notInProgress });
+    }
+
+    await connection.query(
+      'UPDATE orders SET status = ?, cancel_reason = ? WHERE id = ?',
+      ['cancelled', cancelReason, orderId],
+    );
+
+    const [needResult] = await connection.query(
+      "UPDATE needs SET status = 'pending', volunteer_id = NULL WHERE id = ? AND volunteer_id = ? AND status = 'accepted'",
+      [order.need_id, req.user.id],
+    );
+
+    if (needResult.affectedRows !== 1) {
+      throw new Error('释放订单时需求状态不一致');
+    }
+
+    await connection.commit();
+    res.json({ message: messages.orders.released });
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}));
+
 router.put('/:id/complete', authenticateToken, asyncHandler(async (req, res) => {
   const { service_hours } = req.body;
   const orderId = req.params.id;
@@ -41,23 +128,62 @@ router.put('/:id/complete', authenticateToken, asyncHandler(async (req, res) => 
     return res.status(403).json({ message: messages.orders.forbidden });
   }
 
-  await pool.query(
-    "UPDATE orders SET status = 'completed', service_hours = ? WHERE id = ?",
-    [service_hours || 1, orderId],
-  );
-
-  await pool.query(
-    "UPDATE needs SET status = 'completed' WHERE id = ?",
-    [orders[0].need_id],
-  );
+  if (orders[0].status !== 'in_progress') {
+    return res.status(400).json({ message: messages.orders.notInProgress });
+  }
 
   const hours = service_hours || 1;
-  await pool.query(
-    'UPDATE users SET service_hours = service_hours + ?, points = points + ? WHERE id = ?',
-    [hours, hours * 10, orders[0].volunteer_id],
-  );
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
 
-  res.json({ message: messages.orders.completed });
+    const [needs] = await connection.query(
+      'SELECT * FROM needs WHERE id = ? FOR UPDATE',
+      [orders[0].need_id],
+    );
+    const [lockedOrders] = await connection.query(
+      'SELECT * FROM orders WHERE id = ? FOR UPDATE',
+      [orderId],
+    );
+    const order = lockedOrders[0];
+
+    if (!order || needs.length === 0 || order.status !== 'in_progress') {
+      await connection.rollback();
+      if (!order) {
+        return res.status(404).json({ message: messages.orders.notFound });
+      }
+      if (order.status === 'completed') {
+        return res.status(400).json({ message: messages.orders.alreadyCompleted });
+      }
+      if (order.status === 'cancelled') {
+        return res.status(400).json({ message: messages.orders.cancelledCannotComplete });
+      }
+      return res.status(400).json({ message: messages.orders.notInProgress });
+    }
+
+    await connection.query(
+      "UPDATE orders SET status = 'completed', service_hours = ?, end_time = NOW() WHERE id = ?",
+      [hours, orderId],
+    );
+
+    await connection.query(
+      "UPDATE needs SET status = 'completed' WHERE id = ?",
+      [order.need_id],
+    );
+
+    await connection.query(
+      'UPDATE users SET service_hours = service_hours + ?, points = points + ? WHERE id = ?',
+      [hours, hours * 10, order.volunteer_id],
+    );
+
+    await connection.commit();
+    res.json({ message: messages.orders.completed });
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }));
 
 router.post('/:id/review', authenticateToken, asyncHandler(async (req, res) => {

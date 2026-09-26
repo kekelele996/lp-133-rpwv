@@ -7,6 +7,7 @@
         <el-tabs v-model="activeTab" @tab-change="fetchOrders">
           <el-tab-pane label="进行中" name="in_progress" />
           <el-tab-pane label="已完成" name="completed" />
+          <el-tab-pane label="已取消" name="cancelled" />
           <el-tab-pane label="全部" name="" />
         </el-tabs>
       </el-card>
@@ -31,8 +32,19 @@
                 </el-tag>
                 <el-tag v-if="order.status === 'in_progress'" type="warning" class="ml-2" size="small">进行中</el-tag>
                 <el-tag v-else-if="order.status === 'completed'" type="success" class="ml-2" size="small">已完成</el-tag>
+                <el-tag v-else-if="order.status === 'cancelled'" type="danger" class="ml-2" size="small">已取消</el-tag>
               </div>
-              
+
+              <el-alert
+                v-if="order.status === 'cancelled' && order.cancel_reason"
+                class="mb-3"
+                type="warning"
+                :closable="false"
+                show-icon
+                title="取消原因"
+                :description="order.cancel_reason"
+              />
+
               <div class="text-gray-600 text-sm mb-3">
                 <p v-if="user?.role === 'volunteer'">
                   <el-icon class="mr-1"><User /></el-icon>
@@ -58,9 +70,18 @@
             </div>
             
             <div class="flex flex-col gap-2">
-              <el-button 
-                v-if="order.status === 'in_progress'" 
-                type="primary" 
+              <el-button
+                v-if="order.status === 'in_progress' && user?.role === 'volunteer' && order.volunteer_id === user.id"
+                type="danger"
+                plain
+                size="small"
+                @click="showReleaseDialog(order)"
+              >
+                释放订单
+              </el-button>
+              <el-button
+                v-if="order.status === 'in_progress'"
+                type="primary"
                 size="small"
                 @click="handleComplete(order)"
               >
@@ -88,6 +109,32 @@
       </div>
     </div>
     
+    <el-dialog v-model="releaseDialogVisible" title="释放订单" width="500px">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        title="释放后需求将重新回到待接单，原订单会标记为已取消并保留原因。"
+        class="mb-4"
+      />
+      <el-form label-width="80px">
+        <el-form-item label="取消原因" required>
+          <el-input
+            v-model="releaseForm.cancel_reason"
+            type="textarea"
+            :rows="4"
+            maxlength="500"
+            show-word-limit
+            placeholder="请填写临时无法继续服务的原因"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="releaseDialogVisible = false">取消</el-button>
+        <el-button type="danger" :loading="submittingRelease" @click="submitRelease">确认释放</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="reviewDialogVisible" title="服务评价" width="500px">
       <el-form :model="reviewForm" label-width="80px">
         <el-form-item label="评分">
@@ -121,8 +168,14 @@ const loading = ref(false)
 const activeTab = ref('in_progress')
 const reviewDialogVisible = ref(false)
 const submittingReview = ref(false)
+const releaseDialogVisible = ref(false)
+const submittingRelease = ref(false)
 const currentOrder = ref(null)
 const reviewedOrders = ref([])
+
+const releaseForm = ref({
+  cancel_reason: ''
+})
 
 const reviewForm = ref({
   rating: 5,
@@ -150,6 +203,35 @@ const fetchOrders = async () => {
     orders.value = res.data.orders
   } finally {
     loading.value = false
+  }
+}
+
+const showReleaseDialog = (order) => {
+  currentOrder.value = order
+  releaseForm.value = { cancel_reason: '' }
+  releaseDialogVisible.value = true
+}
+
+const submitRelease = async () => {
+  const cancelReason = releaseForm.value.cancel_reason.trim()
+  if (!cancelReason) {
+    ElMessage.warning('请填写无法继续服务的原因')
+    return
+  }
+
+  try {
+    submittingRelease.value = true
+    await api.post(`/orders/${currentOrder.value.id}/release`, {
+      cancel_reason: cancelReason
+    })
+    ElMessage.success('订单已释放，需求已重新开放')
+    releaseDialogVisible.value = false
+    activeTab.value = 'cancelled'
+    await fetchOrders()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.message || '释放订单失败')
+  } finally {
+    submittingRelease.value = false
   }
 }
 

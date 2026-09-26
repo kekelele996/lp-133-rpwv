@@ -75,6 +75,7 @@ const initData = async () => {
         user_id INT NOT NULL,
         volunteer_id INT NOT NULL,
         status ENUM('in_progress', 'completed', 'cancelled') DEFAULT 'in_progress',
+        cancel_reason VARCHAR(500) COMMENT '取消原因(志愿者释放时填写)',
         service_hours DECIMAL(8, 2) DEFAULT 0,
         start_time DATETIME,
         end_time DATETIME,
@@ -89,6 +90,16 @@ const initData = async () => {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
     console.log('✅ 订单表创建完成');
+
+    // 兼容已存在的旧库：补充取消原因字段（志愿者释放订单时填写）
+    const [cancelReasonCols] = await pool.query(
+      `SELECT COUNT(*) AS exists_flag FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = 'volunteer_db' AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'cancel_reason'`
+    );
+    if (cancelReasonCols[0].exists_flag === 0) {
+      await pool.query('ALTER TABLE orders ADD COLUMN cancel_reason VARCHAR(500) COMMENT "取消原因(志愿者释放时填写)" AFTER status');
+      console.log('✅ 订单表补充 cancel_reason 字段完成');
+    }
 
     // 创建评价表
     await pool.query(`

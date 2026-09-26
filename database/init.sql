@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS orders (
   user_id INT NOT NULL COMMENT '需求发布者ID',
   volunteer_id INT NOT NULL COMMENT '志愿者ID',
   status ENUM('in_progress', 'completed', 'cancelled') DEFAULT 'in_progress' COMMENT '状态',
+  cancel_reason VARCHAR(500) COMMENT '取消原因(志愿者释放时填写)',
   service_hours DECIMAL(8, 2) DEFAULT 0 COMMENT '服务时长(小时)',
   start_time DATETIME COMMENT '开始时间',
   end_time DATETIME COMMENT '结束时间',

@@ -20,6 +20,13 @@ NEED_ID=""
 ORDER_ID=""
 INITIAL_POINTS=0
 
+# 释放流程相关变量
+VOLUNTEER2_TOKEN=""
+RELEASE_NEED_ID=""
+RELEASE_ORDER_ID=""
+RELEASE_REASON1="临时突发急事，无法按约定前往"
+RELEASE_REASON2="重复提交时换了一个原因"
+
 test_step() {
   echo -e "${YELLOW}▶ $1${NC}"
 }
@@ -304,6 +311,210 @@ else
 fi
 
 echo ""
+
+# ========================================
+# 志愿者释放订单流程测试
+# ========================================
+
+# 18. 第二个志愿者登录（用于验证不能替人操作）
+test_step "18. 第二名志愿者登录 (13800138002 / 123456)"
+LOGIN_RES=$(curl -s -X POST "$BASE_URL/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"13800138002","password":"123456"}')
+
+if echo "$LOGIN_RES" | grep -q "登录成功" > /dev/null 2>&1; then
+  VOLUNTEER2_TOKEN=$(echo "$LOGIN_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+  test_pass "第二名志愿者登录成功"
+else
+  echo "响应: $LOGIN_RES"
+  test_fail "第二名志愿者登录失败"
+fi
+
+echo ""
+
+# 19. 发布新需求并由第一名志愿者接单（为释放流程准备进行中的订单）
+test_step "19. 居民再发布一条需求，第一名志愿者接单"
+PUBLISH_RES=$(curl -s -X POST "$BASE_URL/needs" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $RESIDENT_TOKEN" \
+  -d '{
+    "title": "需要帮忙取快递",
+    "description": "行动不便，希望帮忙到小区门口取一下快递",
+    "type": "shopping",
+    "address": "北京市朝阳区光华路2号",
+    "lat": 39.9122,
+    "lng": 116.4574
+  }')
+
+RELEASE_NEED_ID=$(echo "$PUBLISH_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['needId'])")
+
+curl -s -X POST "$BASE_URL/needs/$RELEASE_NEED_ID/accept" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN" > /dev/null
+
+ORDERS_RES=$(curl -s "$BASE_URL/orders?status=in_progress" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN")
+RELEASE_ORDER_ID=$(echo "$ORDERS_RES" | python3 -c "
+import sys,json
+orders = json.load(sys.stdin)['orders']
+match = [o['id'] for o in orders if o['need_id'] == $RELEASE_NEED_ID]
+print(match[0] if match else '')")
+
+if [ -n "$RELEASE_ORDER_ID" ]; then
+  test_pass "接单成功，订单ID: $RELEASE_ORDER_ID"
+else
+  test_fail "释放流程的测试订单创建失败"
+fi
+
+echo ""
+
+# 20. 权限校验：其他志愿者、居民都不能替人释放
+test_step "20. 其他志愿者不能替人释放（应返回无权限）"
+OTHER_RES=$(curl -s -X POST "$BASE_URL/orders/$RELEASE_ORDER_ID/release" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VOLUNTEER2_TOKEN" \
+  -d "{\"cancel_reason\": \"$RELEASE_REASON1\"}")
+
+if echo "$OTHER_RES" | grep -q "只有接单志愿者本人才能释放订单" > /dev/null 2>&1; then
+  test_pass "其他志愿者释放被拒绝"
+else
+  echo "响应: $OTHER_RES"
+  test_fail "其他志愿者不应能替人释放订单"
+fi
+
+RESIDENT_RES=$(curl -s -X POST "$BASE_URL/orders/$RELEASE_ORDER_ID/release" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $RESIDENT_TOKEN" \
+  -d "{\"cancel_reason\": \"$RELEASE_REASON1\"}")
+
+if echo "$RESIDENT_RES" | grep -q "只有接单志愿者本人才能释放订单" > /dev/null 2>&1; then
+  test_pass "居民释放也被拒绝"
+else
+  echo "响应: $RESIDENT_RES"
+  test_fail "居民不应能释放志愿者的订单"
+fi
+
+echo ""
+
+# 21. 原因必填
+test_step "21. 不填原因不能释放（应返回请填写释放原因）"
+NO_REASON_RES=$(curl -s -X POST "$BASE_URL/orders/$RELEASE_ORDER_ID/release" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN" \
+  -d '{"cancel_reason": "   "}')
+
+if echo "$NO_REASON_RES" | grep -q "请填写释放原因" > /dev/null 2>&1; then
+  test_pass "空原因被拒绝"
+else
+  echo "响应: $NO_REASON_RES"
+  test_fail "释放订单应要求填写原因"
+fi
+
+echo ""
+
+# 22. 接单志愿者本人填写原因并释放
+test_step "22. 接单志愿者填写原因并释放订单"
+RELEASE_RES=$(curl -s -X POST "$BASE_URL/orders/$RELEASE_ORDER_ID/release" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN" \
+  -d "{\"cancel_reason\": \"$RELEASE_REASON1\"}")
+
+if echo "$RELEASE_RES" | grep -q "订单已释放" > /dev/null 2>&1; then
+  test_pass "释放成功"
+else
+  echo "响应: $RELEASE_RES"
+  test_fail "释放订单失败"
+fi
+
+echo ""
+
+# 23. 验证：订单已取消并保留第一次的原因；需求回到待接单；重复提交不改原因
+test_step "23. 验证订单状态/原因与需求状态"
+ORDERS_RES=$(curl -s "$BASE_URL/orders" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN")
+ORDER_STATE=$(echo "$ORDERS_RES" | python3 -c "
+import sys,json
+orders = json.load(sys.stdin)['orders']
+o = [x for x in orders if x['id'] == $RELEASE_ORDER_ID][0]
+print(o['status'] + '|' + (o['cancel_reason'] or ''))")
+ORDER_STATUS=$(echo "$ORDER_STATE" | cut -d'|' -f1)
+ORDER_REASON=$(echo "$ORDER_STATE" | cut -d'|' -f2-)
+
+NEED_RES=$(curl -s "$BASE_URL/needs/$RELEASE_NEED_ID")
+NEED_STATE=$(echo "$NEED_RES" | python3 -c "
+import sys,json
+n = json.load(sys.stdin)['need']
+print(n['status'] + '|' + str(n['volunteer_id']))")
+NEED_STATUS=$(echo "$NEED_STATE" | cut -d'|' -f1)
+NEED_VOLUNTEER=$(echo "$NEED_STATE" | cut -d'|' -f2)
+
+# 重复提交：再释放一次并换成别的原因，应只保留第一次结果
+curl -s -X POST "$BASE_URL/orders/$RELEASE_ORDER_ID/release" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN" \
+  -d "{\"cancel_reason\": \"$RELEASE_REASON2\"}" > /dev/null
+
+ORDERS_RES=$(curl -s "$BASE_URL/orders" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN")
+ORDER_REASON_AFTER=$(echo "$ORDERS_RES" | python3 -c "
+import sys,json
+orders = json.load(sys.stdin)['orders']
+print([x for x in orders if x['id'] == $RELEASE_ORDER_ID][0]['cancel_reason'] or '')")
+
+OK=true
+if [ "$ORDER_STATUS" = "cancelled" ]; then
+  test_pass "原订单已标记为已取消"
+else
+  test_fail "订单状态应为 cancelled，实际: $ORDER_STATUS"; OK=false
+fi
+if [ "$ORDER_REASON" = "$RELEASE_REASON1" ]; then
+  test_pass "订单保留了填写的释放原因"
+else
+  test_fail "取消原因不匹配，实际: $ORDER_REASON"; OK=false
+fi
+if [ "$NEED_STATUS" = "pending" ] && [ "$NEED_VOLUNTEER" = "None" ]; then
+  test_pass "需求已回到待接单，且不再占用志愿者"
+else
+  test_fail "需求应为 pending 且 volunteer_id 为空，实际: $NEED_STATE"; OK=false
+fi
+if [ "$ORDER_REASON_AFTER" = "$RELEASE_REASON1" ]; then
+  test_pass "重复提交只保留第一次的原因"
+else
+  test_fail "重复提交覆盖了第一次的原因，实际: $ORDER_REASON_AFTER"; OK=false
+fi
+
+echo ""
+
+# 24. 释放后需求可被其他志愿者再次接单
+test_step "24. 释放后第二名志愿者可重新接单"
+REACCEPT_RES=$(curl -s -X POST "$BASE_URL/needs/$RELEASE_NEED_ID/accept" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VOLUNTEER2_TOKEN")
+
+if echo "$REACCEPT_RES" | grep -q "接单成功" > /dev/null 2>&1; then
+  test_pass "需求重新接单成功，居民可再找到志愿者"
+else
+  echo "响应: $REACCEPT_RES"
+  test_fail "释放后的需求应能被其他志愿者接单"
+fi
+
+echo ""
+
+# 25. 已完成的订单不能释放（步骤9完成的订单）
+test_step "25. 已完成的订单不能释放"
+COMPLETED_RES=$(curl -s -X POST "$BASE_URL/orders/$ORDER_ID/release" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN" \
+  -d '{"cancel_reason": "服务都做完了才想取消"}')
+
+if echo "$COMPLETED_RES" | grep -q "已完成的订单不能释放" > /dev/null 2>&1; then
+  test_pass "已完成订单的释放被拒绝"
+else
+  echo "响应: $COMPLETED_RES"
+  test_fail "已完成的订单不应能释放"
+fi
+
+echo ""
 echo "======================================"
 echo -e "${GREEN}🎉 所有测试通过！${NC}"
 echo "======================================"
@@ -322,6 +533,11 @@ echo "   ✅ 积分兑换礼品（保温杯100积分）"
 echo "   ✅ 兑换记录查询"
 echo "   ✅ 消息发送/接收"
 echo "   ✅ 积分排名"
+echo "   ✅ 志愿者释放订单（原因必填、原订单取消并保留原因、需求回到待接单）"
+echo "   ✅ 已完成订单不能释放"
+echo "   ✅ 重复提交只保留第一次结果"
+echo "   ✅ 其他志愿者/居民不能替人操作"
+echo "   ✅ 释放后其他志愿者可重新接单"
 echo ""
 echo "🎮 现在可以打开浏览器访问 http://localhost:8233 体验完整功能"
 echo ""

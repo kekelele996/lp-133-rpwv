@@ -21,6 +21,7 @@
               <el-tag v-if="need.status === 'pending'" type="success">待接单</el-tag>
               <el-tag v-else-if="need.status === 'accepted'" type="warning">已接单</el-tag>
               <el-tag v-else-if="need.status === 'completed'" type="info">已完成</el-tag>
+              <el-tag v-else-if="need.status === 'cancelled'" type="danger">已取消</el-tag>
             </div>
           </template>
           

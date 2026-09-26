@@ -34,6 +34,11 @@ module.exports = {
     forbidden: '无权限操作',
     completed: '服务已完成',
     reviewed: '评价成功',
+    releaseReasonRequired: '请填写释放原因',
+    onlyVolunteerCanRelease: '只有接单志愿者本人才能释放订单',
+    completedCannotRelease: '已完成的订单不能释放',
+    cancelledCannotComplete: '订单已取消，无法完成服务',
+    released: '订单已释放，需求已重新开放',
   },
   messages: {
     missingFields: '请填写接收者和内容',

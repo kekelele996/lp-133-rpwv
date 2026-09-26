@@ -110,17 +110,34 @@ router.post('/:id/accept', authenticateToken, asyncHandler(async (req, res) => {
     return res.status(400).json({ message: messages.needs.cannotAcceptOwnNeed });
   }
 
-  await pool.query(
-    "UPDATE needs SET status = 'accepted', volunteer_id = ? WHERE id = ?",
-    [req.user.id, needId],
-  );
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
 
-  await pool.query(
-    "INSERT INTO orders (need_id, user_id, volunteer_id, status) VALUES (?, ?, ?, 'in_progress')",
-    [needId, needs[0].user_id, req.user.id],
-  );
+    // 条件更新抢占需求，防止并发/重复接单（需求被释放后多名志愿者同时接单时先到先得）
+    const [acceptResult] = await conn.query(
+      "UPDATE needs SET status = 'accepted', volunteer_id = ? WHERE id = ? AND status = 'pending'",
+      [req.user.id, needId],
+    );
 
-  res.json({ message: messages.needs.accepted });
+    if (acceptResult.affectedRows === 0) {
+      await conn.rollback();
+      return res.status(400).json({ message: messages.needs.alreadyAccepted });
+    }
+
+    await conn.query(
+      "INSERT INTO orders (need_id, user_id, volunteer_id, status) VALUES (?, ?, ?, 'in_progress')",
+      [needId, needs[0].user_id, req.user.id],
+    );
+
+    await conn.commit();
+    res.json({ message: messages.needs.accepted });
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
 }));
 
 module.exports = router;
